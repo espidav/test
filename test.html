@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Engine TV Player</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        :root { --bg: #080808; --accent: #e50914; --card: #1a1a1a; }
+        body { margin: 0; background: var(--bg); color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        
+        /* Area de Video */
+        #video-viewport { width: 100%; height: 50vh; background: #000; position: relative; }
+        video { width: 100%; height: 100%; }
+
+        /* Lista de Canales */
+        #content { flex: 1; overflow-y: auto; padding: 20px; background: linear-gradient(180deg, #111 0%, #080808 100%); }
+        .category { margin-bottom: 25px; }
+        .cat-name { font-size: 1.1rem; font-weight: bold; margin-bottom: 10px; color: var(--accent); text-transform: uppercase; }
+        
+        .grid { display: flex; gap: 15px; overflow-x: auto; padding: 10px 0; scrollbar-width: none; }
+        .grid::-webkit-scrollbar { display: none; }
+
+        /* Tarjeta optimizada para Control Remoto */
+        .channel-card { 
+            min-width: 150px; background: var(--card); border-radius: 10px; 
+            padding: 10px; text-align: center; cursor: pointer;
+            border: 3px solid transparent; transition: 0.2s; outline: none;
+        }
+        .channel-card:focus { 
+            border-color: white; transform: scale(1.1); background: #333;
+            box-shadow: 0 0 15px rgba(255,255,255,0.2);
+        }
+        .channel-card img { width: 100%; height: 75px; object-fit: contain; pointer-events: none; }
+        .channel-card span { font-size: 0.9rem; display: block; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="video-viewport">
+    <video id="main-video" controls autoplay></video>
+</div>
+
+<div id="content">
+    <div id="dynamic-list">Cargando canales...</div>
+</div>
+
+<script>
+    const GIST_URL = "https://gist.githubusercontent.com/killermina/f85b5faace03d9d0eedd80328ea40ab5/raw/28bca8e8b4d676c669fa8412e8f0f75fcb24967b/makanada.json";
+    
+    let shakaPlayer;
+    let hlsEngine;
+    const videoElement = document.getElementById('main-video');
+
+    async function initApps() {
+        // Inicializar Shaka
+        shaka.polyfill.installAll();
+        shakaPlayer = new shaka.Player(videoElement);
+        
+        // Listener de errores para Shaka
+        shakaPlayer.addEventListener('error', (e) => console.error('Shaka Error:', e.detail));
+
+        loadList();
+    }
+
+    async function loadList() {
+        try {
+            const res = await fetch(GIST_URL);
+            const data = await res.json();
+            renderUI(data);
+        } catch (e) {
+            document.getElementById('dynamic-list').innerText = "Error cargando JSON.";
+        }
+    }
+
+    // Lógica para procesar llaves DRM
+    async function processKeys(license) {
+        if (typeof license === 'object') return license;
+        try {
+            const url = license.replace("dl=0", "dl=1");
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.keys) {
+                const clean = {};
+                data.keys.forEach(k => {
+                    clean[k.kid.replace(/-/g, "")] = k.k.replace(/-/g, "");
+                });
+                return clean;
+            }
+            return data;
+        } catch (e) { return null; }
+    }
+
+    async function playChannel(item) {
+        // Limpiar ambos reproductores antes de empezar
+        if (hlsEngine) { hlsEngine.destroy(); hlsEngine = null; }
+        await shakaPlayer.unload();
+        videoElement.pause();
+        videoElement.src = "";
+
+        console.log("Intentando reproducir:", item.name);
+
+        // REPRODUCTOR 1: SHAKA (Para DASH .mpd y DRM ClearKey)
+        if (item.url.includes('.mpd') || item.type === "CLEARKEY") {
+            try {
+                if (item.type === "CLEARKEY") {
+                    const keys = await processKeys(item.drm_license_uri);
+                    shakaPlayer.configure({ drm: { clearKeys: keys } });
+                }
+                await shakaPlayer.load(item.url);
+                videoElement.play();
+                return; // Éxito con Shaka
+            } catch (e) {
+                console.warn("Shaka falló, intentando alternativa...");
+            }
+        }
+
+        // REPRODUCTOR 2: HLS.js (Para .m3u8)
+        if (item.url.includes('.m3u8')) {
+            if (Hls.isSupported()) {
+                hlsEngine = new Hls();
+                hlsEngine.loadSource(item.url);
+                hlsEngine.attachMedia(videoElement);
+                hlsEngine.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play());
+            } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                // Soporte nativo (Safari / iOS / Algunos Android TV)
+                videoElement.src = item.url;
+                videoElement.play();
+            }
+        } else {
+            // Reproductor Nativo (MP4 u otros)
+            videoElement.src = item.url;
+            videoElement.play();
+        }
+    }
+
+    function renderUI(data) {
+        const container = document.getElementById('dynamic-list');
+        container.innerHTML = "";
+
+        data.forEach(category => {
+            const catBox = document.createElement('div');
+            catBox.className = 'category';
+            catBox.innerHTML = `<div class="cat-name">${category.title}</div>`;
+            
+            const grid = document.createElement('div');
+            grid.className = 'grid';
+
+            category.items.forEach(item => {
+                const card = document.createElement('div');
+                card.className = 'channel-card';
+                card.tabIndex = 0; // Foco para TV Box
+                card.innerHTML = `
+                    <img src="${item.icono}" onerror="this.src='https://via.placeholder.com/150x75?text=TV'">
+                    <span>${item.name}</span>
+                `;
+                
+                card.onclick = () => playChannel(item);
+                card.onkeydown = (e) => { if(e.key === "Enter") playChannel(item); };
+                
+                grid.appendChild(card);
+            });
+            catBox.appendChild(grid);
+            container.appendChild(catBox);
+        });
+
+        // Foco inicial
+        setTimeout(() => { document.querySelector('.channel-card')?.focus(); }, 500);
+    }
+
+    // Navegación D-PAD para Control Remoto
+    window.addEventListener('keydown', (e) => {
+        const active = document.activeElement;
+        if (!active.classList.contains('channel-card')) return;
+
+        if (e.key === "ArrowRight") active.nextElementSibling?.focus();
+        if (e.key === "ArrowLeft") active.previousElementSibling?.focus();
+        if (e.key === "ArrowDown") {
+            const nextCat = active.closest('.category').nextElementSibling;
+            nextCat?.querySelector('.channel-card')?.focus();
+        }
+        if (e.key === "ArrowUp") {
+            const prevCat = active.closest('.category').previousElementSibling;
+            prevCat?.querySelector('.channel-card')?.focus();
+        }
+    });
+
+    document.addEventListener('DOMContentLoaded', initApps);
+</script>
+
+</body>
+</html>
